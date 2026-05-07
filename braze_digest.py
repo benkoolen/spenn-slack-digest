@@ -6,13 +6,20 @@ from datetime import datetime, timedelta
 # ── Config ────────────────────────────────────────────────────────────────────
 LOOKBACK_DAYS   = 7   # Change to 30 for a monthly digest
 MAX_CANVASES    = 20  # Cap so Slack message stays readable
+DEBUG           = os.environ.get("BRAZE_DIGEST_DEBUG", "false").lower() in ("1", "true", "yes")
 
 
 # ── Braze helpers ─────────────────────────────────────────────────────────────
+def debug_print(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
+
+
 def braze_get(path, params=None):
     """Make an authenticated GET request to Braze."""
     headers = {"Authorization": f"Bearer {BRAZE_API_KEY}"}
     url = f"{BRAZE_ENDPOINT}{path}"
+    debug_print("Braze GET", url, params)
     response = requests.get(url, headers=headers, params=params, timeout=15)
     response.raise_for_status()
     return response.json()
@@ -22,6 +29,7 @@ def get_active_canvases():
     """Return list of enabled Canvases (id + name)."""
     data = braze_get("/canvas/list", params={"include_archived": False})
     canvases = data.get("canvases", [])
+    debug_print("Active canvas payload keys:", list(data.keys()))
     # Filter to enabled only, cap at MAX_CANVASES
     active = [c for c in canvases if c.get("enabled", True)]
     return active[:MAX_CANVASES]
@@ -35,14 +43,19 @@ def get_canvas_summary(canvas_id):
     end_date   = datetime.utcnow().date()
     start_date = end_date - timedelta(days=LOOKBACK_DAYS)
 
-    data = braze_get("/canvas/data_summary", params={
+    response = braze_get("/canvas/data_summary", params={
         "canvas_id":         canvas_id,
         "ending_at":         end_date.isoformat(),
         "starting_at":       start_date.isoformat(),
         "include_variant_breakdown": False,
         "include_step_breakdown":    False,
     })
-    return data.get("data", {})
+
+    data = response.get("data")
+    if data is None:
+        debug_print("data_summary response missing top-level 'data' key, falling back to full response")
+        data = response
+    return data
 
 
 # ── Data assembly ─────────────────────────────────────────────────────────────
@@ -53,21 +66,26 @@ def build_canvas_rows():
       - list of {event_name, conversion_count} dicts
     """
     canvases = get_active_canvases()
+    print(f"Found {len(canvases)} active canvases from Braze", flush=True)
     rows = []
 
     for canvas in canvases:
         canvas_id   = canvas["id"]
         canvas_name = canvas["name"]
 
+        print(f"Processing canvas: {canvas_name} ({canvas_id})", flush=True)
         try:
             summary = get_canvas_summary(canvas_id)
         except requests.HTTPError as e:
-            print(f"  ⚠ Skipping {canvas_name}: {e}")
+            print(f"  ⚠ Skipping {canvas_name}: {e}", flush=True)
             continue
 
         # Braze returns conversion_behaviors as a list of objects
         # Each has a 'name' (the event label) and 'total' (conversions in window)
         conversion_behaviors = summary.get("conversion_behaviors", [])
+        if DEBUG and not conversion_behaviors:
+            debug_print("Canvas summary keys:", list(summary.keys()))
+            debug_print("Canvas summary snippet:", {k: summary.get(k) for k in list(summary.keys())[:5]})
 
         events = []
         for cb in conversion_behaviors:
