@@ -65,7 +65,7 @@ def braze_get(path, params=None):
 
 def get_active_canvases():
     """Return list of enabled Canvases (id + name)."""
-    data = braze_get("canvas/list", params={"include_archived": False})
+    data = braze_get("/canvas/list", params={"include_archived": False})
     canvases = extract_canvas_list(data) or []
 
     debug_print("Active canvas payload keys:", list(data.keys()))
