@@ -4,16 +4,28 @@ on:
     - cron: "0 8 * * 1"   # Every Monday at 8am UTC
   workflow_dispatch:        # Also allows manual trigger from GitHub UI
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   digest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - run: pip install requests
-      - run: python braze_digest.py
+      - run: python -u -m pip install -r requirements.txt
+      - name: Confirm secrets are present
+        run: |
+          echo "BRAZE_API_KEY set: ${BRAZE_API_KEY:+yes}"
+          echo "BRAZE_ENDPOINT set: ${BRAZE_ENDPOINT:+yes}"
+          echo "SLACK_WEBHOOK_URL set: ${SLACK_WEBHOOK_URL:+yes}"
+        env:
+          BRAZE_API_KEY:       ${{ secrets.BRAZE_API_KEY }}
+          BRAZE_ENDPOINT:      ${{ secrets.BRAZE_ENDPOINT }}
+          SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
+      - run: python -u braze_digest.py
         env:
           BRAZE_API_KEY:       ${{ secrets.BRAZE_API_KEY }}
           BRAZE_ENDPOINT:      ${{ secrets.BRAZE_ENDPOINT }}
