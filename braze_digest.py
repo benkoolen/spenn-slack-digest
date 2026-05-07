@@ -4,10 +4,6 @@ import requests
 from datetime import datetime, timedelta
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BRAZE_API_KEY   = os.environ["BRAZE_API_KEY"]
-BRAZE_ENDPOINT  = os.environ["BRAZE_ENDPOINT"].rstrip("/")   # e.g. https://rest.iad-01.braze.com
-SLACK_WEBHOOK   = os.environ["SLACK_WEBHOOK_URL"]
-
 LOOKBACK_DAYS   = 7   # Change to 30 for a monthly digest
 MAX_CANVASES    = 20  # Cap so Slack message stays readable
 
@@ -159,12 +155,20 @@ def post_to_slack(payload):
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
+        # Load config from environment
+        BRAZE_API_KEY   = os.environ["BRAZE_API_KEY"]
+        BRAZE_ENDPOINT  = os.environ["BRAZE_ENDPOINT"].rstrip("/")   # e.g. https://rest.iad-01.braze.com
+        SLACK_WEBHOOK   = os.environ["SLACK_WEBHOOK_URL"]
+
         print(f"Fetching active Canvases from Braze...")
         rows = build_canvas_rows()
         print(f"Found {len(rows)} Canvas(es) with conversion events.")
 
         payload = format_slack_message(rows)
         post_to_slack(payload)
+    except KeyError as e:
+        print(f"❌ Missing environment variable: {e}")
+        raise
     except Exception as e:
         print(f"❌ Error: {e}")
         raise
