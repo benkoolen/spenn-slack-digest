@@ -160,15 +160,16 @@ if __name__ == "__main__":
         BRAZE_ENDPOINT  = os.environ["BRAZE_ENDPOINT"].rstrip("/")   # e.g. https://rest.iad-01.braze.com
         SLACK_WEBHOOK   = os.environ["SLACK_WEBHOOK_URL"]
 
-        print(f"Fetching active Canvases from Braze...")
+        print("Starting Braze digest script...", flush=True)
+        print(f"Fetching active Canvases from Braze...", flush=True)
         rows = build_canvas_rows()
-        print(f"Found {len(rows)} Canvas(es) with conversion events.")
+        print(f"Found {len(rows)} Canvas(es) with conversion events.", flush=True)
 
         payload = format_slack_message(rows)
         post_to_slack(payload)
     except KeyError as e:
-        print(f"❌ Missing environment variable: {e}")
+        print(f"❌ Missing environment variable: {e}", flush=True)
         raise
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error: {e}", flush=True)
         raise
