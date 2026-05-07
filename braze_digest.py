@@ -158,9 +158,13 @@ def post_to_slack(payload):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"Fetching active Canvases from Braze...")
-    rows = build_canvas_rows()
-    print(f"Found {len(rows)} Canvas(es) with conversion events.")
+    try:
+        print(f"Fetching active Canvases from Braze...")
+        rows = build_canvas_rows()
+        print(f"Found {len(rows)} Canvas(es) with conversion events.")
 
-    payload = format_slack_message(rows)
-    post_to_slack(payload)
+        payload = format_slack_message(rows)
+        post_to_slack(payload)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        raise
