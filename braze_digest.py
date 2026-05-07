@@ -4,8 +4,9 @@ import requests
 from datetime import datetime, timedelta
 
 # ── Config ────────────────────────────────────────────────────────────────────
-LOOKBACK_DAYS   = 7   # Change to 30 for a monthly digest
-MAX_CANVASES    = 20  # Cap so Slack message stays readable
+LOOKBACK_DAYS   = 7          # Change to 30 for a monthly digest
+CANVAS_TAG      = "SCHMACK"  # Only fetch canvases with this Braze tag; set to "" to disable
+MAX_CANVASES    = 20         # Only used as a fallback if CANVAS_TAG is empty
 DEBUG           = os.environ.get("BRAZE_DIGEST_DEBUG", "false").lower() in ("1", "true", "yes")
 
 
@@ -27,13 +28,16 @@ def braze_get(path, params=None):
 
 def get_active_canvases():
     """
-    Return list of active Canvases (id + name).
+    Return list of active Canvases (id + name), filtered by CANVAS_TAG if set.
     Relies on include_archived=False to exclude inactive canvases —
     the API does not return a reliable 'enabled' field per canvas object.
     """
-    data = braze_get("/canvas/list", params={"include_archived": False})
+    params = {"include_archived": False}
+    if CANVAS_TAG:
+        params["tags[]"] = CANVAS_TAG  # Braze expects array param notation
 
-    # FIX: consolidated, safe canvas extraction — avoids calling .get() on None
+    data = braze_get("/canvas/list", params=params)
+
     canvases = (
         data.get("canvases")
         or (data.get("data") or {}).get("canvases")
@@ -48,17 +52,16 @@ def get_active_canvases():
     ))
 
     if not canvases:
-        print("Warning: /canvas/list returned no canvases.", flush=True)
+        tag_msg = f" with tag '{CANVAS_TAG}'" if CANVAS_TAG else ""
+        print(f"Warning: /canvas/list returned no canvases{tag_msg}.", flush=True)
         if data:
             print("Payload keys:", list(data.keys()), flush=True)
             print("Payload snippet:", json.dumps(
                 {k: data[k] for k in list(data.keys())[:5]}, indent=2
             ), flush=True)
 
-    # FIX: removed the c.get("enabled", True) filter — Braze does not return
-    # an 'enabled' field on canvas list objects. Archival exclusion is handled
-    # by the include_archived=False param above.
-    return canvases[:MAX_CANVASES]
+    # If filtering by tag, return all matched canvases; otherwise cap at MAX_CANVASES
+    return canvases if CANVAS_TAG else canvases[:MAX_CANVASES]
 
 
 def get_canvas_summary(canvas_id):
@@ -109,24 +112,45 @@ def build_canvas_rows():
 
         debug_print("Canvas summary for", canvas_name, ":", json.dumps(summary, indent=2))
 
-        # Braze returns conversion_behaviors as a list of objects.
-        # Each has a 'name' (the event label) and 'total' (conversions in window).
-        conversion_behaviors = summary.get("conversion_behaviors", [])
-
-        if not conversion_behaviors:
+        # Pull stats from total_stats, which is present on Canvas Flow responses.
+        # Canvases returning ['notice', 'message'] are unsupported by this endpoint
+        # and are skipped cleanly.
+        if "notice" in summary or "message" in summary:
             print(
-                f"  ℹ {canvas_name}: no conversion_behaviors in summary "
-                f"(keys: {list(summary.keys())})",
+                f"  ⚠ {canvas_name}: API notice — {summary.get('notice', '')} {summary.get('message', '')}".strip(),
                 flush=True
             )
+            continue
+
+        total_stats = summary.get("total_stats", {})
 
         events = []
-        for cb in conversion_behaviors:
-            event_name = cb.get("name") or cb.get("description") or "Unnamed event"
-            count      = cb.get("total", 0)
-            events.append({"event_name": event_name, "count": count})
 
-        # Only include canvases that have at least one conversion event configured
+        # Sent / delivered counts
+        sends = total_stats.get("total_sends") or total_stats.get("sent", 0)
+        if sends:
+            events.append({"event_name": "Sent", "count": sends})
+
+        unique_recipients = total_stats.get("unique_recipients", 0)
+        if unique_recipients:
+            events.append({"event_name": "Unique Recipients", "count": unique_recipients})
+
+        opens = total_stats.get("total_opens") or total_stats.get("opens", 0)
+        if opens:
+            events.append({"event_name": "Opens", "count": opens})
+
+        clicks = total_stats.get("total_clicks") or total_stats.get("clicks", 0)
+        if clicks:
+            events.append({"event_name": "Clicks", "count": clicks})
+
+        conversions = total_stats.get("total_conversions") or total_stats.get("conversions", 0)
+        if conversions:
+            events.append({"event_name": "Conversions", "count": conversions})
+
+        revenue = total_stats.get("revenue", 0)
+        if revenue:
+            events.append({"event_name": "Revenue", "count": revenue})
+
         if events:
             rows.append({
                 "canvas_name": canvas_name,
@@ -134,7 +158,8 @@ def build_canvas_rows():
             })
         else:
             print(
-                f"  ℹ {canvas_name}: skipped — no conversion events configured in Braze.",
+                f"  ℹ {canvas_name}: skipped — total_stats empty or all zeros "
+                f"(keys: {list(total_stats.keys())})",
                 flush=True
             )
 
