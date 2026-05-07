@@ -9,6 +9,12 @@ CANVAS_TAG      = "SCHMACK"  # Only fetch canvases with this Braze tag; set to "
 MAX_CANVASES    = 20         # Only used as a fallback if CANVAS_TAG is empty
 DEBUG           = os.environ.get("BRAZE_DIGEST_DEBUG", "false").lower() in ("1", "true", "yes")
 
+# Override: if populated, skip /canvas/list entirely and process only these IDs.
+# Remove entries (or clear the list) once tag-based filtering is confirmed working.
+CANVAS_ID_OVERRIDE = [
+    "2b5a571e-2ffe-4210-9744-d5abb9079b03",  # 20260420_PushOptInDrive_AllMarkets_Activation_EM-IAM-CC_V1
+]
+
 
 # ── Braze helpers ─────────────────────────────────────────────────────────────
 def debug_print(*args, **kwargs):
@@ -32,9 +38,13 @@ def get_active_canvases():
     Relies on include_archived=False to exclude inactive canvases —
     the API does not return a reliable 'enabled' field per canvas object.
     """
-    params = {"include_archived": False}
+    params = {
+        "include_archived": False,
+        "page":             0,
+        "per_page":         500,  # Max allowed by Braze — ensures we don't hit the 100-canvas default cap
+    }
     if CANVAS_TAG:
-        params["tags[]"] = CANVAS_TAG  # Braze expects array param notation
+        params["tags"] = CANVAS_TAG  # Note: no [] — Braze /canvas/list uses plain 'tags' param
 
     data = braze_get("/canvas/list", params=params)
 
@@ -93,10 +103,15 @@ def build_canvas_rows():
     For each active Canvas, return a dict with:
       - canvas_name
       - events: list of {event_name, count} dicts
-    Canvases with no conversion events configured in Braze are excluded.
+    Canvases with no activity in the lookback window are excluded.
     """
-    canvases = get_active_canvases()
-    print(f"Found {len(canvases)} active canvas(es) from Braze", flush=True)
+    if CANVAS_ID_OVERRIDE:
+        canvases = [{"id": cid, "name": cid} for cid in CANVAS_ID_OVERRIDE]
+        print(f"ID override active — bypassing /canvas/list, processing {len(canvases)} canvas(es) directly.", flush=True)
+    else:
+        canvases = get_active_canvases()
+
+    print(f"Found {len(canvases)} canvas(es) to process.", flush=True)
     rows = []
 
     for canvas in canvases:
@@ -124,9 +139,12 @@ def build_canvas_rows():
 
         total_stats = summary.get("total_stats", {})
 
+        # If override is active, use the real canvas name from the summary if available
+        if CANVAS_ID_OVERRIDE and canvas_name == canvas_id:
+            canvas_name = summary.get("name", canvas_id)
+
         events = []
 
-        # Sent / delivered counts
         sends = total_stats.get("total_sends") or total_stats.get("sent", 0)
         if sends:
             events.append({"event_name": "Sent", "count": sends})
@@ -170,7 +188,7 @@ def build_canvas_rows():
 def format_slack_message(rows):
     """
     Build a Slack Block Kit payload.
-    One section per Canvas; conversion events listed with their count.
+    One section per Canvas; stats listed with their count.
     """
     end_date   = datetime.utcnow().date()
     start_date = end_date - timedelta(days=LOOKBACK_DAYS)
@@ -181,7 +199,7 @@ def format_slack_message(rows):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"📊 Braze Canvas Conversions  |  {date_range}",
+                "text": f"📊 Braze Canvas Digest  |  {date_range}",
                 "emoji": True
             }
         },
@@ -193,7 +211,7 @@ def format_slack_message(rows):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "_No active Canvases with conversion events found._"
+                "text": "_No active Canvases with data in this period._"
             }
         })
     else:
@@ -243,9 +261,8 @@ if __name__ == "__main__":
         SLACK_WEBHOOK  = os.environ["SLACK_WEBHOOK_URL"]
 
         print("Starting Braze digest script...", flush=True)
-        print(f"Fetching active Canvases from Braze...", flush=True)
         rows = build_canvas_rows()
-        print(f"Found {len(rows)} Canvas(es) with conversion events.", flush=True)
+        print(f"Found {len(rows)} Canvas(es) with data to report.", flush=True)
 
         payload = format_slack_message(rows)
         post_to_slack(payload)
