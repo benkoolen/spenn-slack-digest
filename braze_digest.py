@@ -155,7 +155,8 @@ def post_to_slack(payload):
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
-        # Load config from environment
+        # Load config from environment into the globals used by helper functions
+        global BRAZE_API_KEY, BRAZE_ENDPOINT, SLACK_WEBHOOK
         BRAZE_API_KEY   = os.environ["BRAZE_API_KEY"]
         BRAZE_ENDPOINT  = os.environ["BRAZE_ENDPOINT"].rstrip("/")   # e.g. https://rest.iad-01.braze.com
         SLACK_WEBHOOK   = os.environ["SLACK_WEBHOOK_URL"]
