@@ -15,6 +15,44 @@ def debug_print(*args, **kwargs):
         print(*args, **kwargs)
 
 
+def extract_canvas_list(response):
+    """Find the first canvas-like list in a Braze response."""
+    if not isinstance(response, dict):
+        return None
+
+    candidates = []
+    for key in ("canvases", "canvas_list", "data"):
+        value = response.get(key)
+        if isinstance(value, list):
+            candidates.append((key, value))
+        elif isinstance(value, dict):
+            inner = value.get("canvases") or value.get("canvas_list")
+            if isinstance(inner, list):
+                candidates.append((f"{key}.{ 'canvases' if 'canvases' in value else 'canvas_list' }", inner))
+
+    if candidates:
+        # prefer top-level lists first
+        return candidates[0][1]
+
+    # fallback: scan recursively for a list of dicts with id & name
+    def scan(value, path=""):
+        if isinstance(value, list):
+            if all(isinstance(item, dict) and item.get("id") and item.get("name") for item in value[:5]):
+                return value
+            for idx, item in enumerate(value):
+                found = scan(item, f"{path}[{idx}]")
+                if found is not None:
+                    return found
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                found = scan(v, f"{path}.{k}" if path else k)
+                if found is not None:
+                    return found
+        return None
+
+    return scan(response)
+
+
 def braze_get(path, params=None):
     """Make an authenticated GET request to Braze."""
     headers = {"Authorization": f"Bearer {BRAZE_API_KEY}"}
@@ -28,10 +66,29 @@ def braze_get(path, params=None):
 def get_active_canvases():
     """Return list of enabled Canvases (id + name)."""
     data = braze_get("/canvas/list", params={"include_archived": False})
-    canvases = data.get("canvases", [])
+    canvases = extract_canvas_list(data) or []
+
     debug_print("Active canvas payload keys:", list(data.keys()))
+    debug_print("Returned canvases:", json.dumps(
+        [{"id": c.get("id"), "name": c.get("name"), "enabled": c.get("enabled")} for c in canvases],
+        indent=2
+    ))
+    debug_print("Returned canvas count:", len(canvases))
+
+    if not canvases:
+        print("Warning: /canvas/list returned no canvases.", flush=True)
+        if data:
+            print("Payload keys:", list(data.keys()), flush=True)
+            print("Payload snippet:", json.dumps({k: data[k] for k in list(data.keys())[:5]}, indent=2), flush=True)
+
     # Filter to enabled only, cap at MAX_CANVASES
     active = [c for c in canvases if c.get("enabled", True)]
+    if canvases and not active:
+        print(f"Warning: {len(canvases)} canvases returned, but none were enabled.", flush=True)
+        print("Sample canvases:", json.dumps(
+            [{"id": c.get("id"), "name": c.get("name"), "enabled": c.get("enabled")} for c in canvases[:5]],
+            indent=2
+        ), flush=True)
     return active[:MAX_CANVASES]
 
 
@@ -80,12 +137,19 @@ def build_canvas_rows():
             print(f"  ⚠ Skipping {canvas_name}: {e}", flush=True)
             continue
 
+        if DEBUG:
+            debug_print("Canvas summary for", canvas_name, "(", canvas_id, "):")
+            debug_print(json.dumps(summary, indent=2))
+
         # Braze returns conversion_behaviors as a list of objects
         # Each has a 'name' (the event label) and 'total' (conversions in window)
         conversion_behaviors = summary.get("conversion_behaviors", [])
-        if DEBUG and not conversion_behaviors:
-            debug_print("Canvas summary keys:", list(summary.keys()))
-            debug_print("Canvas summary snippet:", {k: summary.get(k) for k in list(summary.keys())[:5]})
+        if not conversion_behaviors:
+            print(f"Warning: canvas {canvas_name} returned {len(conversion_behaviors)} conversion_behaviors.", flush=True)
+            print("Canvas summary keys:", list(summary.keys()), flush=True)
+            print("Canvas summary snippet:", json.dumps({k: summary.get(k) for k in list(summary.keys())[:5]}, indent=2), flush=True)
+            if not conversion_behaviors and "conversion_behaviors" not in summary:
+                print("Note: `conversion_behaviors` is missing from the canvas summary.", flush=True)
 
         events = []
         for cb in conversion_behaviors:
