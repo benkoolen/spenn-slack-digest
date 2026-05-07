@@ -15,44 +15,6 @@ def debug_print(*args, **kwargs):
         print(*args, **kwargs)
 
 
-def extract_canvas_list(response):
-    """Find the first canvas-like list in a Braze response."""
-    if not isinstance(response, dict):
-        return None
-
-    candidates = []
-    for key in ("canvases", "canvas_list", "data"):
-        value = response.get(key)
-        if isinstance(value, list):
-            candidates.append((key, value))
-        elif isinstance(value, dict):
-            inner = value.get("canvases") or value.get("canvas_list")
-            if isinstance(inner, list):
-                candidates.append((f"{key}.{ 'canvases' if 'canvases' in value else 'canvas_list' }", inner))
-
-    if candidates:
-        # prefer top-level lists first
-        return candidates[0][1]
-
-    # fallback: scan recursively for a list of dicts with id & name
-    def scan(value, path=""):
-        if isinstance(value, list):
-            if all(isinstance(item, dict) and item.get("id") and item.get("name") for item in value[:5]):
-                return value
-            for idx, item in enumerate(value):
-                found = scan(item, f"{path}[{idx}]")
-                if found is not None:
-                    return found
-        elif isinstance(value, dict):
-            for k, v in value.items():
-                found = scan(v, f"{path}.{k}" if path else k)
-                if found is not None:
-                    return found
-        return None
-
-    return scan(response)
-
-
 def braze_get(path, params=None):
     """Make an authenticated GET request to Braze."""
     headers = {"Authorization": f"Bearer {BRAZE_API_KEY}"}
@@ -64,32 +26,39 @@ def braze_get(path, params=None):
 
 
 def get_active_canvases():
-    """Return list of enabled Canvases (id + name)."""
+    """
+    Return list of active Canvases (id + name).
+    Relies on include_archived=False to exclude inactive canvases —
+    the API does not return a reliable 'enabled' field per canvas object.
+    """
     data = braze_get("/canvas/list", params={"include_archived": False})
-    canvases = extract_canvas_list(data) or []
+
+    # FIX: consolidated, safe canvas extraction — avoids calling .get() on None
+    canvases = (
+        data.get("canvases")
+        or (data.get("data") or {}).get("canvases")
+        or []
+    )
 
     debug_print("Active canvas payload keys:", list(data.keys()))
+    debug_print("Returned canvas count:", len(canvases))
     debug_print("Returned canvases:", json.dumps(
-        [{"id": c.get("id"), "name": c.get("name"), "enabled": c.get("enabled")} for c in canvases],
+        [{"id": c.get("id"), "name": c.get("name")} for c in canvases],
         indent=2
     ))
-    debug_print("Returned canvas count:", len(canvases))
 
     if not canvases:
         print("Warning: /canvas/list returned no canvases.", flush=True)
         if data:
             print("Payload keys:", list(data.keys()), flush=True)
-            print("Payload snippet:", json.dumps({k: data[k] for k in list(data.keys())[:5]}, indent=2), flush=True)
+            print("Payload snippet:", json.dumps(
+                {k: data[k] for k in list(data.keys())[:5]}, indent=2
+            ), flush=True)
 
-    # Filter to enabled only, cap at MAX_CANVASES
-    active = [c for c in canvases if c.get("enabled", True)]
-    if canvases and not active:
-        print(f"Warning: {len(canvases)} canvases returned, but none were enabled.", flush=True)
-        print("Sample canvases:", json.dumps(
-            [{"id": c.get("id"), "name": c.get("name"), "enabled": c.get("enabled")} for c in canvases[:5]],
-            indent=2
-        ), flush=True)
-    return active[:MAX_CANVASES]
+    # FIX: removed the c.get("enabled", True) filter — Braze does not return
+    # an 'enabled' field on canvas list objects. Archival exclusion is handled
+    # by the include_archived=False param above.
+    return canvases[:MAX_CANVASES]
 
 
 def get_canvas_summary(canvas_id):
@@ -101,9 +70,9 @@ def get_canvas_summary(canvas_id):
     start_date = end_date - timedelta(days=LOOKBACK_DAYS)
 
     response = braze_get("/canvas/data_summary", params={
-        "canvas_id":         canvas_id,
-        "ending_at":         end_date.isoformat(),
-        "starting_at":       start_date.isoformat(),
+        "canvas_id":                 canvas_id,
+        "ending_at":                 end_date.isoformat(),
+        "starting_at":               start_date.isoformat(),
         "include_variant_breakdown": False,
         "include_step_breakdown":    False,
     })
@@ -119,11 +88,12 @@ def get_canvas_summary(canvas_id):
 def build_canvas_rows():
     """
     For each active Canvas, return a dict with:
-      - name
-      - list of {event_name, conversion_count} dicts
+      - canvas_name
+      - events: list of {event_name, count} dicts
+    Canvases with no conversion events configured in Braze are excluded.
     """
     canvases = get_active_canvases()
-    print(f"Found {len(canvases)} active canvases from Braze", flush=True)
+    print(f"Found {len(canvases)} active canvas(es) from Braze", flush=True)
     rows = []
 
     for canvas in canvases:
@@ -137,19 +107,18 @@ def build_canvas_rows():
             print(f"  ⚠ Skipping {canvas_name}: {e}", flush=True)
             continue
 
-        if DEBUG:
-            debug_print("Canvas summary for", canvas_name, "(", canvas_id, "):")
-            debug_print(json.dumps(summary, indent=2))
+        debug_print("Canvas summary for", canvas_name, ":", json.dumps(summary, indent=2))
 
-        # Braze returns conversion_behaviors as a list of objects
-        # Each has a 'name' (the event label) and 'total' (conversions in window)
+        # Braze returns conversion_behaviors as a list of objects.
+        # Each has a 'name' (the event label) and 'total' (conversions in window).
         conversion_behaviors = summary.get("conversion_behaviors", [])
+
         if not conversion_behaviors:
-            print(f"Warning: canvas {canvas_name} returned {len(conversion_behaviors)} conversion_behaviors.", flush=True)
-            print("Canvas summary keys:", list(summary.keys()), flush=True)
-            print("Canvas summary snippet:", json.dumps({k: summary.get(k) for k in list(summary.keys())[:5]}, indent=2), flush=True)
-            if not conversion_behaviors and "conversion_behaviors" not in summary:
-                print("Note: `conversion_behaviors` is missing from the canvas summary.", flush=True)
+            print(
+                f"  ℹ {canvas_name}: no conversion_behaviors in summary "
+                f"(keys: {list(summary.keys())})",
+                flush=True
+            )
 
         events = []
         for cb in conversion_behaviors:
@@ -157,12 +126,17 @@ def build_canvas_rows():
             count      = cb.get("total", 0)
             events.append({"event_name": event_name, "count": count})
 
-        # Only include Canvases that have at least one conversion event defined
+        # Only include canvases that have at least one conversion event configured
         if events:
             rows.append({
                 "canvas_name": canvas_name,
                 "events":      events,
             })
+        else:
+            print(
+                f"  ℹ {canvas_name}: skipped — no conversion events configured in Braze.",
+                flush=True
+            )
 
     return rows
 
@@ -192,11 +166,13 @@ def format_slack_message(rows):
     if not rows:
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "_No active Canvases with conversion events found._"}
+            "text": {
+                "type": "mrkdwn",
+                "text": "_No active Canvases with conversion events found._"
+            }
         })
     else:
         for row in rows:
-            # Build event lines, e.g.  "↳ Purchase completed — 142"
             event_lines = "\n".join(
                 f"  ↳ *{e['event_name']}* — {e['count']:,}"
                 for e in row["events"]
@@ -210,7 +186,6 @@ def format_slack_message(rows):
             })
             blocks.append({"type": "divider"})
 
-    # Footer
     blocks.append({
         "type": "context",
         "elements": [{
@@ -237,11 +212,10 @@ def post_to_slack(payload):
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
-        # Load config from environment into the globals used by helper functions
         global BRAZE_API_KEY, BRAZE_ENDPOINT, SLACK_WEBHOOK
-        BRAZE_API_KEY   = os.environ["BRAZE_API_KEY"]
-        BRAZE_ENDPOINT  = os.environ["BRAZE_ENDPOINT"].rstrip("/")   # e.g. https://rest.iad-01.braze.com
-        SLACK_WEBHOOK   = os.environ["SLACK_WEBHOOK_URL"]
+        BRAZE_API_KEY  = os.environ["BRAZE_API_KEY"]
+        BRAZE_ENDPOINT = os.environ["BRAZE_ENDPOINT"].rstrip("/")  # e.g. https://rest.iad-01.braze.com
+        SLACK_WEBHOOK  = os.environ["SLACK_WEBHOOK_URL"]
 
         print("Starting Braze digest script...", flush=True)
         print(f"Fetching active Canvases from Braze...", flush=True)
